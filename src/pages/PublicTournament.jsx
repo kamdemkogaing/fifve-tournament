@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { computeStandings } from '../lib/standings'
 import { supabase } from '../lib/supabase'
@@ -9,42 +9,79 @@ export default function PublicTournament() {
   const [matches, setMatches] = useState([])
   const [error, setError] = useState('')
 
-  async function load() {
-    setError('')
-    const { data: t, error: e1 } = await supabase
-      .from('tournaments')
-      .select('id, slug, name, option, config, created_at')
-      .eq('slug', slug)
-      .single()
+  const load = useCallback(async () => {
+    if (!slug) return
 
-    if (e1) {
-      setError(e1.message)
-      return
+    // cancel flag so old requests can't update state after slug change/unmount
+    let cancelled = false
+
+    // NOTE: we return a cleanup function that sets cancelled = true
+    // (we'll use it in the effect below)
+    const run = async () => {
+      setError('')
+
+      const { data: t, error: e1 } = await supabase
+        .from('tournaments')
+        .select('id, slug, name, option, config, created_at')
+        .eq('slug', slug)
+        .single()
+
+      if (cancelled) return
+
+      if (e1) {
+        setError(e1.message)
+        setTournament(null)
+        setMatches([])
+        return
+      }
+
+      setTournament(t)
+
+      const { data: ms, error: e2 } = await supabase
+        .from('matches')
+        .select('*')
+        .eq('tournament_id', t.id)
+        .order('time_text', { ascending: true })
+
+      if (cancelled) return
+
+      if (e2) {
+        setError(e2.message)
+        setMatches([])
+        return
+      }
+
+      setMatches(ms ?? [])
     }
-    setTournament(t)
 
-    const { data: ms, error: e2 } = await supabase
-      .from('matches')
-      .select('*')
-      .eq('tournament_id', t.id)
-      .order('time_text', { ascending: true })
+    await run()
 
-    if (e2) {
-      setError(e2.message)
-      return
+    // provide cleanup setter for callers that want it
+    return () => {
+      cancelled = true
     }
-    setMatches(ms ?? [])
-  }
-
-  useEffect(() => {
-    load()
   }, [slug])
+
+  // initial load + when slug changes
+  useEffect(() => {
+    let cleanup
+    ;(async () => {
+      cleanup = await load()
+    })()
+
+    return () => {
+      if (typeof cleanup === 'function') cleanup()
+    }
+  }, [load])
 
   // simple polling for live-ish updates
   useEffect(() => {
-    const id = setInterval(load, 15000)
+    const id = setInterval(() => {
+      load()
+    }, 15000)
+
     return () => clearInterval(id)
-  }, [slug])
+  }, [load])
 
   const standings = useMemo(() => computeStandings(matches), [matches])
 
